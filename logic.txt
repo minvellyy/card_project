@@ -1,0 +1,157 @@
+1) 전체 로직(사용자 화면 흐름 + 데이터 처리 흐름)
+A. 화면(페이지) 흐름
+
+로그인(Login)
+
+고정 계정으로 로그인 성공 시 다음 단계로 이동
+
+데이터 입력(Data Input)
+
+CSV 업로드 → 고객 ID 컬럼 지정 → “분석 실행”
+
+이탈가능 고객 추출(Extract Customers)
+
+위험도 라벨(즉시 이탈 위험/고위험/중위험/안정) 선택 → 해당 그룹 고객 리스트 확인
+
+마케팅 전략 제언(Strategy)
+
+고객 리스트에서 행 클릭으로 고객 1명 선택 → “전략 생성” 버튼 클릭 → 카드/표 형태 전략 출력
+
+B. 데이터(모델/전처리/추론) 흐름
+
+CSV 로드 (data_input.render)
+
+추론 파이프라인 실행 (inference.predict_and_build)
+
+모델/임계치 로딩 (models/final_churn_model.pkl, models/risk_thresholds.pkl)
+
+전처리 (ai_lib.preprocess_data)
+
+이탈 확률 예측( churn_proba )
+
+임계치 기반 위험 티어 생성 (risk_tier) 및 한글 위험군 라벨(risk_group) 생성
+
+결과 DataFrame 반환
+
+세션 저장 (Streamlit session_state)
+
+df(예측 결과) / df_raw(원본 데이터) 저장 → 이후 페이지에서 재사용
+
+추출 페이지에서 예측결과 + 원본 merge 후 필터링 (extract_customers.render)
+
+전략 페이지에서 고객 1명 선택 → OpenAI 호출 → UI JSON 생성 → 렌더링 (marketing_strategy.render)
+
+2) 모듈별 간단 설명(역할 중심)
+① app.py (엔트리/라우팅 컨트롤러)
+
+Streamlit 앱 시작점.
+
+st.session_state.route 기반으로 페이지 라우팅:
+
+login / data / extract / strategy
+
+URL query param과 세션을 동기화하여 새로고침/공유에도 라우트 상태 복원(sync_route_from_query).
+
+로그아웃 액션 처리.
+
+② modules/ui.py (UI 프레임워크 + 라우팅 유틸)
+
+공통 UI(디자인 토큰/ CSS)와 페이지 레이아웃(shell) 제공.
+
+핵심 기능:
+
+init_app(): 페이지 기본 설정 + CSS 주입 + 세션 기본값 세팅
+
+topbar(route): 상단바/네비게이션(쿼리 파라미터 링크 방식)
+
+goto(route): 세션 route + URL query param 동시 갱신 후 rerun
+
+sync_route_from_query(): URL에 담긴 route/auth 정보로 세션 복원
+
+require_login(): 로그인 안 됐으면 로그인 페이지로 강제 이동
+
+logout(): 로그인 세션/쿼리 초기화 후 로그인으로 이동
+
+③ modules/login.py (인증)
+
+고정 계정 기반 로그인(현재 예시: admin / 1234).
+
+로그인 성공 시 after_login_route로 복귀(원래 가려던 페이지로 되돌림).
+
+④ modules/data_input.py (데이터 업로드 + 추론 실행 트리거)
+
+CSV 업로드(st.file_uploader)
+
+고객 식별자 컬럼(id_col)을 사용자가 선택/입력
+
+inference.predict_and_build(df_raw, id_col) 호출로 예측 수행
+
+결과를 세션에 저장:
+
+st.session_state.df (예측 결과)
+
+st.session_state.df_raw (원본 데이터)
+
+완료 후 extract 페이지로 이동
+
+⑤ modules/ai_lib.py (전처리/피처 엔지니어링)
+
+모델 입력을 만들기 위한 전처리 표준화 담당.
+
+주요 내용:
+
+핵심 범주형 변수 One-Hot Encoding (gender, region, income_band, card_grade)
+
+파생변수 생성: 최근 3개월/과거 3개월 소비 기반 spent_change_ratio 등
+
+모델 학습 피처(model_features)에 컬럼을 정확히 맞추도록 reindex(fill_value=0)
+
+최종 모델 입력에서 ID 컬럼 제거
+
+⑥ modules/inference.py (모델 로딩 + 예측 + 위험등급 산출)
+
+예측 파이프라인의 “두뇌”.
+
+구성:
+
+load_artifacts()로 모델/임계치/피처리스트를 캐시 로딩(재실행 성능 안정화)
+
+predict_and_build():
+
+preprocess_data()로 입력 X 생성
+
+모델로 확률 예측 → churn_proba
+
+임계치(T90/T95/T99)로 risk_tier 부여
+
+risk_tier를 한글 위험군(risk_group)으로 매핑
+
+⑦ modules/extract_customers.py (위험군별 고객 추출/리스트업)
+
+df(예측)와 df_raw(원본)를 customer_id로 merge하여 예측값 + 고객 속성/행동 데이터를 한 화면에서 조회.
+
+위험군 선택(즉시 이탈 위험/고위험/중위험/안정) → 해당 그룹 상위 고객(확률 내림차순) 표시.
+
+다음 단계인 strategy로 이동 버튼 제공.
+
+⑧ modules/marketing_strategy.py (전략 생성: 고객 선택 → LLM → UI 렌더링)
+
+이 페이지는 “전략 생성”이 핵심이며 흐름은 다음과 같습니다.
+
+df + df_raw를 합쳐 위험군 세그먼트 구성(_build_segment)
+
+Streamlit st.dataframe(selection_mode="single-row")로 고객 1명 클릭 선택
+
+선택 고객의 핵심 필드만 추출(_select_customer_fields)
+
+프롬프트가 과도하게 길어지는 것을 방지
+
+OpenAI 호출(_call_openai_json)로 전략 UI 렌더링용 JSON 생성
+
+.env의 GPT_API_KEY 필요
+
+반환 JSON을 카드/표 UI로 렌더링(_render_strategy_cards, _render_channel_table, _render_message_box)
+
+3) 한 줄로 정리한 “시스템 핵심 로직”
+
+CSV 업로드 → 전처리(피처 정규화/원-핫/파생) → 이탈확률 예측 → 임계치 기반 위험군 분류 → 위험군 고객 추출 → 고객 1명 선택 → LLM으로 맞춤 전략(JSON) 생성 → UI 카드/표로 출력
